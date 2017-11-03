@@ -42,6 +42,7 @@ final class ActivityController: UITableViewController {
 
     fileprivate let events = Variable<[Event]>([])
     fileprivate let bag = DisposeBag()
+    fileprivate let lastModified = Variable<NSString?>(nil)
 
     // MARK: - Life Circle
     override func viewDidLoad() {
@@ -59,6 +60,8 @@ final class ActivityController: UITableViewController {
         // read object from file plist
         let eventsArray = (NSArray(contentsOf: eventsFileURL) as? [[String: Any]]) ?? []
             events.value = eventsArray.flatMap(Event.init)
+
+        lastModified.value = try? NSString(contentsOf: modifiedFileURL, usedEncoding: nil)
         refresh()
     }
 
@@ -88,8 +91,12 @@ final class ActivityController: UITableViewController {
             .map { urlString -> URL in
                 return URL(string: "https://api.github.com/repos/\(urlString)/events")!
             }
-            .map { url -> URLRequest in
-                return URLRequest(url: url)
+            .map { [weak self] url -> URLRequest in
+                var request = URLRequest(url: url)
+                if let modifiedHeader = self?.lastModified.value {
+                    request.addValue(modifiedHeader as String, forHTTPHeaderField: "Last-Modified")
+                }
+                return request
             }
             .flatMap { request -> Observable<(HTTPURLResponse, Data)> in
                 return URLSession.shared.rx.response(request: request)
@@ -115,6 +122,24 @@ final class ActivityController: UITableViewController {
             }
             .subscribe(onNext: { [weak self] newEvents in
                 self?.processEvents(newEvents)
+            }).addDisposableTo(bag)
+
+        response
+            .filter { response, _ in
+                return 200..<400 ~= response.statusCode
+            }
+            .flatMap { response, _ -> Observable<NSString> in
+                guard let value = response.allHeaderFields["Last-Modified"] as? NSString else { // Grab value of the header api
+                    return Observable.never()
+                }
+                return Observable.just(value)
+            }
+            .subscribe(onNext: { [weak self] modifiedHeader in
+                guard let this = self else { return }
+                this.lastModified.value = modifiedHeader
+
+                // write save file modifiedFileURL = cachedFileURL("modified.txt")
+                try? modifiedHeader.write(to: this.modifiedFileURL, atomically: true, encoding: String.Encoding.utf8.rawValue)
             }).addDisposableTo(bag)
     }
 
