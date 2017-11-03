@@ -67,7 +67,11 @@ final class ActivityController: UITableViewController {
 
     // MARK: - Public Func
     func refresh() {
-        fetchEvents(repo: repo)
+        DispatchQueue.global(qos: .background).async { [weak self] in
+            guard let this = self else { return }
+             this.fetchEvents(repo: this.repo)
+        }
+
     }
 
     // MARK: - Private Func
@@ -77,8 +81,11 @@ final class ActivityController: UITableViewController {
             updateEvents = Array<Event>(updateEvents.prefix(upTo: 50))
         }
         events.value = updateEvents
-        tableView.reloadData()
-        self.refreshControl?.endRefreshing()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.tableView.reloadData()
+            self?.refreshControl?.endRefreshing()
+        }
 
         // map object and write to save file plist
         let eventsArray = updateEvents.map { $0.dictionary } as NSArray
@@ -87,21 +94,35 @@ final class ActivityController: UITableViewController {
 
 
     private func fetchEvents(repo: String) {
-        let response = Observable.from([repo])
+        let response = Observable.from(["https://api.github.com/search/repositories?q=language:swift&per_page=5"])
+            .map { urlString -> URL in
+                return URL(string: urlString)!
+            }
+            .flatMap { url -> Observable<Any> in
+                let request = URLRequest(url: url)
+                return URLSession.shared.rx.json(request: request)
+            }
+            .flatMap { response -> Observable<String> in
+                guard let response = response as? [String: Any], let items = response["items"] as? [[String: Any]] else {
+                    return Observable.never()
+                }
+                return Observable.from(items.map { $0["full_name"] as! String })
+            }
             .map { urlString -> URL in
                 return URL(string: "https://api.github.com/repos/\(urlString)/events")!
             }
             .map { [weak self] url -> URLRequest in
                 var request = URLRequest(url: url)
                 if let modifiedHeader = self?.lastModified.value {
-                    request.addValue(modifiedHeader as String, forHTTPHeaderField: "Last-Modified")
+                    request.addValue(modifiedHeader as String,
+                                     forHTTPHeaderField: "Last-Modified")
                 }
                 return request
             }
             .flatMap { request -> Observable<(HTTPURLResponse, Data)> in
                 return URLSession.shared.rx.response(request: request)
             }
-            .shareReplay(1) // create bộ đệm để đảm bảo request 1 lần
+            .shareReplay(1)
 
         response
             .filter { response, _ in
